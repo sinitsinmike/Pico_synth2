@@ -1,0 +1,115 @@
+name: Build Pico Synth (UF2)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pico-synth-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Set to "false" to avoid touching your CMake files during CI.
+  AUTO_PATCH_CMAKE: "true"
+  SDK_DIR: firmware/.pico-sdk
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Cache pico-sdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SDK_DIR }}
+          key: pico-sdk-${{ runner.os }}-${{ hashFiles('firmware/pico_sdk_import.cmake') }}
+
+      - name: (Optional) Patch CMake for UF2 + missing libs
+        if: env.AUTO_PATCH_CMAKE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES=("firmware/CMakeLists.txt" "CMakeLists.txt")
+          need_save=0
+          for f in "${FILES[@]}"; do
+            [ -f "$f" ] || continue
+            python3 - "$f" <<'PY'
+import io, sys, re, pathlib
+p = pathlib.Path(sys.argv[1])
+txt = p.read_text(encoding="utf-8", errors="ignore")
+
+def ensure_link_libs(s):
+    # Find target_link_libraries(pico-synth ... )
+    pat = r'(target_link_libraries\s*\(\s*pico-synth\b[\s\S]*?\))'
+    m = re.search(pat, s, flags=re.IGNORECASE)
+    if not m:
+        return s, False
+    block = m.group(1)
+    libs_needed = ['pico_stdlib','pico_multicore','hardware_clocks','hardware_i2c','hardware_uart','hardware_pio']
+    # Insert libs if missing just before closing ')'
+    for lib in libs_needed:
+        if not re.search(r'\b'+re.escape(lib)+r'\b', block):
+            block = block[:-1] + f'    {lib}\n)'
+    s = s[:m.start()] + block + s[m.end():]
+    return s, True
+
+def ensure_extra_outputs(s):
+    if re.search(r'\bpico_add_extra_outputs\s*\(\s*pico-synth\s*\)', s):
+        return s, False
+    # Append near the end for safety
+    return s + '\n# CI: ensure UF2 artifacts are generated\npico_add_extra_outputs(pico-synth)\n', True
+
+changed = False
+new, did_link = ensure_link_libs(txt)
+if did_link:
+    changed = True
+new, did_out = ensure_extra_outputs(new)
+if did_out:
+    changed = True
+if changed:
+    p.write_text(new, encoding="utf-8")
+    print(f"Patched: {p}")
+else:
+    print(f"No changes: {p}")
+PY
+          done
+
+      - name: Configure (fetch Pico SDK automatically)
+        working-directory: firmware
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DPICO_SDK_FETCH_FROM_GIT=1 \
+            -DPICO_SDK_FETCH_FROM_GIT_PATH="${{ github.workspace }}/${{ env.SDK_DIR }}"
+
+      - name: Build
+        working-directory: firmware
+        run: cmake --build build -j
+
+      - name: List build outputs (debug)
+        if: always()
+        run: |
+          ls -alh firmware/build || true
+
+      - name: Upload artifacts (UF2/ELF/MAP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-synth-${{ github.sha }}
+          path: |
+            firmware/build/*.uf2
+            firmware/build/*.elf
+            firmware/build/*.map
+          if-no-files-found: warn
