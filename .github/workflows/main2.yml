@@ -1,0 +1,54 @@
+# /.github/workflows/pico-synth_build.yml
+name: Build Pico Synth (UF2)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build-uf2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Cache pico-sdk
+        uses: actions/cache@v4
+        with:
+          path: firmware/.pico-sdk
+          key: pico-sdk-${{ runner.os }}-${{ hashFiles('firmware/pico_sdk_import.cmake') }}
+
+      - name: Configure (fetch Pico SDK)
+        working-directory: firmware
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DPICO_SDK_FETCH_FROM_GIT=1 \
+            -DPICO_SDK_FETCH_FROM_GIT_PATH="${{ github.workspace }}/firmware/.pico-sdk"
+
+      - name: Build
+        working-directory: firmware
+        run: cmake --build build -j
+
+      - name: List outputs
+        if: always()
+        run: ls -alh firmware/build || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-synth-${{ github.sha }}
+          path: |
+            firmware/build/*.uf2
+            firmware/build/*.elf
+            firmware/build/*.map
+          if-no-files-found: warn
