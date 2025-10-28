@@ -1,0 +1,33 @@
+name: build-uf2
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Configure
+        working-directory: firmware
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DPICO_SDK_FETCH_FROM_GIT=1 \
+            -DPICO_SDK_FETCH_FROM_GIT_PATH="${PWD}/.pico-sdk"
+
+      - name: Build
+        working-directory: firmware
+        run: cmake --build build -j
+
+      - name: Upload UF2
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-synth-uf2
+          path: |
+            firmware/build/*.uf2
+            firmware/build/*.elf
