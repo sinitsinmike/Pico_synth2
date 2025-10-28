@@ -1,33 +1,69 @@
-name: build-uf2
-on: [push, pull_request, workflow_dispatch]
+# .github/workflows/pico-synth_build.yml
+name: pico-synth_build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build UF2 (RP2040)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install deps
+      - name: Install build tools (CMake, Ninja, ARM GCC)
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi
+          sudo apt-get install -y \
+            cmake ninja-build \
+            gcc-arm-none-eabi libnewlib-arm-none-eabi
 
-      - name: Configure
+      - name: Cache Pico SDK
+        id: cache-pico-sdk
+        uses: actions/cache@v4
+        with:
+          path: firmware/.pico-sdk
+          key: pico-sdk-${{ runner.os }}-${{ hashFiles('firmware/pico_sdk_import.cmake') }}
+
+      - name: Ensure CMake patches (UF2 + libs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CML="firmware/CMakeLists.txt"
+
+          # Add UF2 outputs if missing
+          if ! grep -qE '^\s*pico_add_extra_outputs\s*\(\s*pico-synth\s*\)' "$CML"; then
+            echo ">> Adding pico_add_extra_outputs(pico-synth)"
+            echo 'pico_add_extra_outputs(pico-synth)' >> "$CML"
+          fi
+
+          # Append link libs (safe to call multiple times)
+          # Needed for: set_sys_clock_khz (hardware_clocks), multicore APIs, I2C/UART/PIO.
+          if ! grep -q 'hardware_clocks' "$CML"; then
+            echo ">> Appending target_link_libraries for required SDK libs"
+            cat >> "$CML" <<'EOF'
+
+# Ensure required Pico SDK libs are linked (append-only; idempotent)
+target_link_libraries(pico-synth
+    pico_stdlib
+    pico_multicore
+    hardware_clocks
+    hardware_i2c
+    hardware_uart
+    hardware_pio
+)
+EOF
+          fi
+
+      - name: Configure (CMake)
         working-directory: firmware
         run: |
           cmake -S . -B build -G Ninja \
             -DPICO_SDK_FETCH_FROM_GIT=1 \
-            -DPICO_SDK_FETCH_FROM_GIT_PATH="${PWD}/.pico-sdk"
-
-      - name: Build
-        working-directory: firmware
-        run: cmake --build build -j
-
-      - name: Upload UF2
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pico-synth-uf2
-          path: |
-            firmware/build/*.uf2
-            firmware/build/*.elf
+            -DPICO_SDK_FETCH_FROM_GIT
